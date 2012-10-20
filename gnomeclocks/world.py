@@ -19,6 +19,7 @@
 import os
 import errno
 import time
+from datetime import datetime, date, timedelta
 import json
 from gi.repository import GLib, GObject, Gio, Gtk, GdkPixbuf
 from gi.repository import GWeather
@@ -125,9 +126,9 @@ class NewWorldClockDialog(Gtk.Dialog):
 class DigitalClock():
     def __init__(self, location):
         self.location = location
-        self._last_sunrise = time.strptime("197007:00", "%Y%H:%M")
+        self._last_sunrise = datetime.strptime("197007:00", "%Y%H:%M")
         self.sunrise = self._last_sunrise
-        self._last_sunset = time.strptime("197019:00", "%Y%H:%M")
+        self._last_sunset = datetime.strptime("197019:00", "%Y%H:%M")
         self.sunset = self._last_sunset
         self.get_sunrise_sunset()
 
@@ -153,17 +154,16 @@ class DigitalClock():
     def get_location_time(self, secs=None):
         if not secs:
             secs = time.time()
-        t = secs + self.offset
-        t = time.localtime(t)
+        t = datetime.fromtimestamp(secs + self.offset)
         return t
 
-    def update(self):
+    def update(self, secs=None):
         clock_format = SystemSettings.get_clock_format()
-        location_time = self.get_location_time()
+        location_time = self.get_location_time(secs)
         if clock_format == '12h':
-            t = time.strftime("%I:%M %p", location_time)
+            t = location_time.strftime("%I:%M %p")
         else:
-            t = time.strftime("%H:%M", location_time)
+            t = location_time.strftime("%H:%M")
         if t.startswith("0"):
             t = t[1:]
         if not t == self._last_time \
@@ -174,7 +174,7 @@ class DigitalClock():
                 img = os.path.join(Dirs.get_image_dir(), "cities", "day.png")
             else:
                 img = os.path.join(Dirs.get_image_dir(), "cities", "night.png")
-            day = self.get_day()
+            day = self.get_day(secs)
             if day == "Today":
                 self.drawing.render(t, img, is_light)
             else:
@@ -210,44 +210,30 @@ class DigitalClock():
         self.update()
         return self.standalone
 
-    def get_day(self):
-        clock_time_day = self.get_location_time().tm_yday
-        local_time_day = time.localtime().tm_yday
+    def get_day(self, secs=None):
+        clock_time = self.get_location_time(secs)
 
-        if clock_time_day == local_time_day:
+        clock_time_day = clock_time.date()
+        local_today = date.today()
+
+        date_offset = (clock_time_day - local_today).days
+        if date_offset == 0:
             return "Today"
-        # if its 31st Dec here and 1st Jan there, clock_time_day = 1,
-        # local_time_day = 365/366
-        # if its 1st Jan here and 31st Dec there, clock_time_day = 365/366,
-        # local_time_day = 1
-        elif clock_time_day > local_time_day:
-            if local_time_day == 1:
+        elif date_offset < 0:
+            if date_offset == -1:
                 return "Yesterday"
             else:
-                return "Tomorrow"
-        elif clock_time_day < local_time_day:
-            if clock_time_day == 1:
+                return "%d days ago" % abs(date_offset)
+        elif date_offset > 0:
+            if date_offset == 1:
                 return "Tomorrow"
             else:
-                return "Yesterday"
+                return "%d days from now" % abs(date_offset)
+        else:
+            return clock_time_day.strftime("%A")
 
     def get_is_light(self, current):
-        if current.tm_hour < self.sunrise.tm_hour \
-                or current.tm_hour > self.sunset.tm_hour:
-            return False
-        elif current.tm_hour > self.sunrise.tm_hour \
-                and current.tm_hour < self.sunset.tm_hour:
-            return True
-        elif current.tm_hour == self.sunrise.tm_hour:
-            if current.tm_min >= self.sunrise.tm_min:
-                return True
-            else:
-                return False
-        elif current.tm_hour == self.sunset.tm_hour:
-            if current.tm_min <= self.sunrise.tm_min:
-                return True
-            else:
-                return False
+        return self.sunrise.time() <= current.time() <= self.sunset.time()
 
     def set_path(self, list_store, path):
         self.path = path
@@ -269,8 +255,11 @@ class World(Clock):
         contentview = ContentView(self.iconview,
                 "document-open-recent-symbolic",
                  _("Select <b>New</b> to add a world clock"))
-        self.add(contentview)
+        
+        self.timeview = TimeAdjustingView(contentview)
+        self.add(self.timeview)
 
+        self.timeview.connect("time-changed", self._on_timeview_time_changed)
         self.iconview.connect("item-activated", self._on_item_activated)
         self.iconview.connect("selection-changed", self._on_selection_changed)
 
@@ -282,9 +271,13 @@ class World(Clock):
         self.timeout_id = GObject.timeout_add(1000, self._update_clocks)
 
     def _update_clocks(self):
+        time_override = self.timeview.get_seconds()
         for c in self.clocks:
-            c.update()
+            c.update(time_override)
         return True
+
+    def _on_timeview_time_changed(self, timeview):
+        self._update_clocks()
 
     def _on_item_activated(self, iconview, path):
         d = self.liststore[path][3]
@@ -356,6 +349,64 @@ class World(Clock):
             l = dialog.get_location()
             self.add_clock(l)
         dialog.destroy()
+
+
+class TimeAdjustingView(Gtk.Box):
+    __gsignals__ = {
+    'time-changed': (GObject.SignalFlags.RUN_LAST,
+                          None,
+                          ())
+    }
+    
+    def __init__(self, content):
+        Gtk.Box.__init__(self, orientation=Gtk.Orientation.VERTICAL, spacing=0)
+
+        self.content = content
+
+        self.timebar = Gtk.Box.new(Gtk.Orientation.HORIZONTAL, 0)
+        self.slider = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 24*60*60, 60)
+        self.timebar.pack_start(self.slider, True, True, 12)
+
+        self.pack_start(self.timebar, False, False, 0)
+        self.pack_end(content, True, True, 0)
+
+        self.slider.connect("value-changed", self._on_slider_value_changed)
+        self.slider.connect("format-value", self._on_slider_format_value)
+
+    def get_time(self):
+        offset_seconds = self.slider.get_value()
+        value_time = datetime.now() + timedelta(seconds=offset_seconds)
+        return value_time
+
+    def get_seconds(self):
+        offset_seconds = self.slider.get_value()
+        value_seconds = time.time() + offset_seconds
+        return value_seconds
+
+    def _on_slider_value_changed(self, scale):
+        self.emit("time-changed")
+
+    def _on_slider_format_value(self, scale, value):
+        #TODO: Sync this code with DigitalClock (and pull code into utils.py where necessary)
+        clock_format = SystemSettings.get_clock_format()
+
+        value_time = self.get_time()
+        tomorrow = date.today() + timedelta(days=1)
+
+        if clock_format == "12h":
+            if value_time.date() >= tomorrow:
+                time_str = value_time.strftime("%I:%M %p tomorrow")
+            else:
+                time_str = value_time.strftime("%I:%M %p")
+        else:
+            if value_time.date() >= tomorrow:
+                time_str = value_time.strftime("%H:%M tomorrow")
+            else:
+                time_str = value_time.strftime("%H:%M")
+        if time_str.startswith("0"):
+            time_str = time_str[1:]
+
+        return time_str
 
 
 class StandaloneClock(Gtk.EventBox):
@@ -436,11 +487,11 @@ class StandaloneClock(Gtk.EventBox):
             self.sunrise = sunrise
             self.sunset = sunset
             if clock_format == "12h":
-                sunrise_str = time.strftime("%I:%M %p", sunrise)
-                sunset_str = time.strftime("%I:%M %p", sunset)
+                sunrise_str = sunrise.strftime("%I:%M %p")
+                sunset_str = sunset.strftime("%I:%M %p")
             else:
-                sunrise_str = time.strftime("%H:%M", sunrise)
-                sunset_str = time.strftime("%H:%M", sunset)
+                sunrise_str = sunrise.strftime("%H:%M")
+                sunset_str = sunset.strftime("%H:%M")
             if sunrise_str.startswith("0"):
                 sunrise_str = sunrise_str[1:]
             if sunset_str.startswith("0"):
