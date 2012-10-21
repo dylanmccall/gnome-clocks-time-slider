@@ -219,16 +219,10 @@ class DigitalClock():
         date_offset = (clock_time_day - local_today).days
         if date_offset == 0:
             return "Today"
-        elif date_offset < 0:
-            if date_offset == -1:
-                return "Yesterday"
-            else:
-                return "%d days ago" % abs(date_offset)
-        elif date_offset > 0:
-            if date_offset == 1:
-                return "Tomorrow"
-            else:
-                return "%d days from now" % abs(date_offset)
+        elif date_offset == -1:
+            return "Yesterday"
+        elif date_offset == 1:
+            return "Tomorrow"
         else:
             return clock_time_day.strftime("%A")
 
@@ -255,9 +249,11 @@ class World(Clock):
         contentview = ContentView(self.iconview,
                 "document-open-recent-symbolic",
                  _("Select <b>New</b> to add a world clock"))
-        
+
         self.timeview = TimeAdjustingView(contentview)
         self.add(self.timeview)
+
+        self._update_source_id = None
 
         self.timeview.connect("time-changed", self._on_timeview_time_changed)
         self.iconview.connect("item-activated", self._on_item_activated)
@@ -276,8 +272,14 @@ class World(Clock):
             c.update(time_override)
         return True
 
+    def _schedule_update(self):
+        if self._update_source_id:
+            GLib.source_remove(self._update_source_id)
+            self._update_source_id = None
+        self._update_source_id = GLib.idle_add(self._update_clocks)
+
     def _on_timeview_time_changed(self, timeview):
-        self._update_clocks()
+        self._schedule_update()
 
     def _on_item_activated(self, iconview, path):
         d = self.liststore[path][3]
